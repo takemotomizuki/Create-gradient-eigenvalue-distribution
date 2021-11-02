@@ -4,7 +4,7 @@ import numpy as np
 import ssl
 import logging
 import matplotlib.pyplot as plt
-from pathlib import Path
+import copy
 
 
 # Configure a logger to capture outputs; these are printed in console and the level of detail is set to INFO
@@ -17,59 +17,23 @@ logger.addHandler(handler)
 
 loss_object = tf.keras.losses.CategoricalCrossentropy()
 ssl._create_default_https_context = ssl._create_unverified_context
-AUTOTUNE = tf.data.experimental.AUTOTUNE
-
-# path 以下の画像を読み込む
-all_image_paths = list(Path('../ILSVRC2012_img_val').glob('*.JPEG'))
-all_image_paths.sort()
-all_image_paths = all_image_paths[:1000]
-all_image_paths = [str(path) for path in all_image_paths]
 
 tf.enable_eager_execution()
 
-#前処理の方法がモデルごとに違うのでそれぞれの関数を定義
-def load_and_preprocess_image_res50(path):
-    image_raw = tf.io.read_file(path)
-    image = tf.image.decode_jpeg(image_raw, channels=3)
-    image = tf.image.resize(image, (224, 224))
-    image = tf.keras.applications.resnet50.preprocess_input(image)
-
-    return image
-
-def load_and_preprocess_image_vgg16(path):
-    image_raw = tf.io.read_file(path)
-    image = tf.image.decode_jpeg(image_raw, channels=3)
-    image = tf.image.resize(image, (224, 224))
-    image = tf.keras.applications.vgg16.preprocess_input(image)
-
-    return image
-
-def load_and_preprocess_image_vgg19(path):
-    image_raw = tf.io.read_file(path)
-    image = tf.image.decode_jpeg(image_raw, channels=3)
-    image = tf.image.resize(image, (224, 224))
-    image = tf.keras.applications.vgg19.preprocess_input(image)
-
-    return image
-
 #勾配とそこから作成される敵対画像を作成
-def create_adversarial_image(model, _x, _y, eps):
-    _X_adv = []
-    grad_ans = []
-    for n,input_image in enumerate(_x.take(100)):
-        input_label = _y[n]
-        input_image = input_image[None, ...]
-        with tf.GradientTape() as tape:
-            tape.watch(input_image)
-            prediction = model(input_image)
-            loss = loss_object(input_label, prediction)
+def get_loss_gradient(model, _x, _y):
+    input_images = tf.multiply(_x, 1)
+    input_labels = tf.multiply(_y, 1)
+    with tf.GradientTape() as tape:
+        tape.watch(input_images)
+        prediction = model(input_images)
+        loss = loss_object(input_labels, prediction)
 
         # Get the gradients of the loss w.r.t to the input image.
-        gradient = tape.gradient(loss, input_image)
-        signed_grad = tf.sign(gradient)
-        _X_adv.append(input_image + eps*signed_grad)
-        grad_ans.append(gradient[0].numpy())
-    return np.array(grad_ans),_X_adv
+        gradient = tape.gradient(loss, input_images)
+    
+    return gradient
+
 
 def create_eige_ans(_grad_list):
     _s_ans = None
@@ -83,22 +47,46 @@ def create_eige_ans(_grad_list):
     return _s_ans
 
 
-d= np.load('../dataset/imagenet_val.npz')
-y = d['y'][:100]
-y = np.eye(1000)[y]
+size = 100
+#自作したnpzファイル画像サイズは224,224で保存している
+d= np.load('../dataset/imagenet_val_float.npz')
+x = d['x'][:size]
+y = d['y'][:size]
 
-path_ds = tf.data.Dataset.from_tensor_slices(all_image_paths)
+eps = 0.01
+img_max = 255.0
 
-image_ds_vgg16 = path_ds.map(load_and_preprocess_image_vgg16, num_parallel_calls=AUTOTUNE)
 vgg16 = tf.keras.applications.vgg16.VGG16(weights='imagenet')
-
-image_ds_vgg19 = path_ds.map(load_and_preprocess_image_vgg19, num_parallel_calls=AUTOTUNE)
+x_vgg16 = copy.deepcopy(x)
+x_vgg16 = tf.keras.applications.vgg16.preprocess_input(x_vgg16)
+preds_vgg16 = np.argmax(vgg16.predict(x_vgg16), axis=1)
+acc_vgg16 = np.sum(preds_vgg16 == np.argmax(y, axis=1)) / y.shape[0]
+print(acc_vgg16*100,"vgg16 clean img")
+grad_vgg16 = get_loss_gradient(vgg16, x, y)
+X_adv = copy.deepcopy(x)
+X_adv = X_adv + eps*np.sign(grad_vgg16)*img_max
+X_adv = np.clip(X_adv, 0, 255)
+X_adv = tf.keras.applications.vgg16.preprocess_input(X_adv)
+preds_vgg16_adv = np.argmax(vgg16.predict(X_adv), axis=1)
+acc_vgg16_adv = np.sum(preds_vgg16_adv == np.argmax(y, axis=1)) / y.shape[0]
+print(acc_vgg16_adv*100, "vgg16 adv img")
+"""
 vgg19 = tf.keras.applications.vgg19.VGG19(weights='imagenet')
+x_vgg19 = copy.deepcopy(x)
+x_vgg19 = tf.keras.applications.vgg19.preprocess_input(x_vgg19)
+preds_vgg19 = np.argmax(vgg19.predict(x_vgg19), axis=1)
+acc_vgg19 = np.sum(preds_vgg19 == np.argmax(y, axis=1)) / y.shape[0]
+print(acc_vgg19*100,"vgg19")
 
-image_ds_res50 = path_ds.map(load_and_preprocess_image_res50, num_parallel_calls=AUTOTUNE)
 resnet50 = tf.keras.applications.resnet50.ResNet50(weights='imagenet')
+x_resnet50 = copy.deepcopy(x)
+x_resnet50 = tf.keras.applications.resnet50.preprocess_input(x_resnet50)
+preds_resnet50 = np.argmax(resnet50.predict(x_resnet50), axis=1)
+acc_resnet50 = np.sum(preds_resnet50 == np.argmax(y, axis=1)) / y.shape[0]
+print(acc_resnet50*100,"resnet50")
+"""
 
-grad_list = create_adversarial_image(resnet50, image_ds, y, 0.5)
+"""
 s_ans = create_eige_ans(grad_list)
 
 plt.hist(s_ans[0],range=(-0.001,0.005),bins=100)
@@ -110,3 +98,4 @@ plt.close()
 plt.hist(s_ans[2],range=(-0.001,0.005),bins=100)
 plt.savefig('assets/resnet50_b.png')
 plt.close()
+"""
