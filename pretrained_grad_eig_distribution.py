@@ -33,7 +33,7 @@ def get_loss_gradient(model, _x, _y):
     
     return gradient
 
-size = 100
+size = 500
 eps = 0.005
 img_max = 255.0
 #ヒストグラム調整用
