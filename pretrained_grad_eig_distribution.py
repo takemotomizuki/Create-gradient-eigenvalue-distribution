@@ -4,7 +4,11 @@ import ssl
 import logging
 import matplotlib.pyplot as plt
 import copy
+from PIL import Image
+import powerlaw
+import math
 
+EVALS_THRESH = 0.00001
 
 # Configure a logger to capture outputs; these are printed in console and the level of detail is set to INFO
 logger = logging.getLogger()
@@ -17,116 +21,148 @@ logger.addHandler(handler)
 loss_object = tf.keras.losses.CategoricalCrossentropy()
 ssl._create_default_https_context = ssl._create_unverified_context
 
-tf.enable_eager_execution()
+tf.compat.v1.enable_eager_execution()
+
+size = 100
+eps = 0.003
+
+def np_extend(ndarray:np.ndarray,range_min:int,range_max:int):
+    """
+    numpy配列を任意の範囲に引き伸ばす
+    """
+    a_max = np.max(ndarray)
+    a_min = np.min(ndarray)
+
+    ndarray = (ndarray-a_min)/(a_max-a_min)
+    ndarray = ndarray*(range_max-range_min)+range_min
+
+    return ndarray
 
 #勾配とそこから作成される敵対画像を作成
 def get_loss_gradient(model, _x, _y):
-    input_images = tf.multiply(_x, 1)
-    input_labels = tf.multiply(_y, 1)
-    with tf.GradientTape() as tape:
-        tape.watch(input_images)
-        prediction = model(input_images)
-        loss = loss_object(input_labels, prediction)
+    num = len(_x)/50
+    x_split = np.array_split(_x, num+1)
+    y_split = np.array_split(_y, num+1)
+    gradient = None
+    for xs,ys in zip(x_split,y_split):
+        input_images = tf.multiply(xs, 1)
+        input_labels = tf.multiply(ys, 1)
+        with tf.GradientTape() as tape:
+            tape.watch(input_images)
+            prediction = model(input_images)
+            loss = loss_object(input_labels, prediction)
 
-        # Get the gradients of the loss w.r.t to the input image.
-        gradient = tape.gradient(loss, input_images)
-    
+            # Get the gradients of the loss w.r.t to the input image.
+            g = tape.gradient(loss, input_images)
+            if gradient is None:
+                gradient = g
+            else:
+                gradient = tf.concat([gradient,g],0)
+
     return gradient
 
-size = 500
-eps = 0.005
-img_max = 255.0
-#ヒストグラム調整用
-adj = 500
+def atk_FGSM_and_plot_grad_eig(_x,_y,model,application,shape=None,name:str=""):
+    x_preprocessed = copy.deepcopy(_x)
+    if shape is not None:
+        tmp = []
+        for img in x_preprocessed:
+            img_pil = Image.fromarray(np.uint8(img))
+            img_resize = img_pil.resize(shape)
+            tmp.append(np.asarray(img_resize))
+        x_preprocessed = np.array(tmp)
+    x_preprocessed = application.preprocess_input(x_preprocessed)
+    x_max = np.max(x_preprocessed)
+    x_min = np.min(x_preprocessed)
+    preds = np.argmax(model.predict(x_preprocessed), axis=1)
+    acc = np.sum(preds == np.argmax(_y, axis=1)) / _y.shape[0]
+    grad = get_loss_gradient(model, x_preprocessed, _y)
+    X_adv = x_preprocessed + eps*np_extend(np.sign(grad),x_min,x_max)
+    preds_adv = np.argmax(model.predict(X_adv), axis=1)
+    acc_adv = np.sum(preds_adv == np.argmax(_y, axis=1)) / _y.shape[0]
+    
+    logger.info(f'Accuracy on clean test images of {name}: {acc*100:.2f}')
+    logger.info(f'Accuracy of FGSM attacks of {name}: {acc_adv*100:.2f}%')
+
+    U, s, V = np.linalg.svd(tf.transpose(grad), full_matrices=False)
+
+    label = ["R","G","B"]
+    range_max = np.max(s)
+    fig, ax = plt.subplots(1, 3,figsize=(12.0, 5.0))
+
+    for a,l,ss in zip(ax,label,s):
+        a.hist(ss.reshape(-1),range=(0,range_max),bins=100,density=True)
+        a.set_title(l)
+    fig.suptitle(f'{name} eps : {eps} clean acc : {acc*100:.2f}% FGSM acc : {acc_adv*100:.2f}%')
+    plt.subplots_adjust(left=0.05, right=0.99)
+    plt.savefig(f'assets/{name}_gradient_size{size}.png')
+    plt.close()
+    
+    nz_s = s[s > EVALS_THRESH]
+    #fit = powerlaw.Fit(nz_s, xmax=range_max, verbose=False)
+
+    range_min_log = math.log10(np.min(nz_s))
+    range_max_log = math.log10(range_max)
+
+    fig, ax = plt.subplots(1, 3,figsize=(24.0, 5.0))
+    for a,l,ss in zip(ax,label,s):
+        a.set_xscale("log")
+        a.set_yscale("log")
+        a.hist(ss.reshape(-1),bins=np.logspace(range_min_log,range_max_log,100),density=True)
+        a.set_title(l)
+
+    fig.suptitle(f'{name} eps : {eps} clean acc : {acc*100:.2f}% FGSM acc : {acc_adv*100:.2f}%')
+    plt.subplots_adjust(left=0.01, right=0.99)
+    plt.savefig(f'assets/{name}_gradient_size{size}_log.png')
+    plt.close()
+    logger.info('saved image')
 
 #自作したnpzファイル画像サイズは224,224で保存している
 d= np.load('../dataset/imagenet_val_float.npz')
 x = d['x'][:size]
 y = d['y'][:size]
 
+#xception
+xception = tf.keras.applications.xception.Xception(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,xception,tf.keras.applications.xception,shape=(299,299),name="xception")
+
 #vgg16
 vgg16 = tf.keras.applications.vgg16.VGG16(weights='imagenet')
-x_vgg16 = copy.deepcopy(x)
-x_vgg16 = tf.keras.applications.vgg16.preprocess_input(x_vgg16)
-preds_vgg16 = np.argmax(vgg16.predict(x_vgg16), axis=1)
-acc_vgg16 = np.sum(preds_vgg16 == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_vgg16*100,"vgg16 clean img")
-grad_vgg16 = get_loss_gradient(vgg16, x, y)
-X_adv_vgg16 = copy.deepcopy(x)
-X_adv_vgg16 = X_adv_vgg16 + eps*np.sign(grad_vgg16)*img_max
-X_adv_vgg16 = np.clip(X_adv_vgg16, 0, 255)
-X_adv_vgg16 = tf.keras.applications.vgg16.preprocess_input(X_adv_vgg16)
-preds_vgg16_adv = np.argmax(vgg16.predict(X_adv_vgg16), axis=1)
-acc_vgg16_adv = np.sum(preds_vgg16_adv == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_vgg16_adv*100, "vgg16 adv img")
-U, s_vgg16, V = np.linalg.svd(tf.transpose(grad_vgg16), full_matrices=False)
+atk_FGSM_and_plot_grad_eig(x,y,vgg16,tf.keras.applications.vgg16,name="vgg16")
 
-fig, ax = plt.subplots(1, 3,figsize=(12.0, 5.0))
-ax[0].hist(s_vgg16[0].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[0].set_title("vgg16 R")
-ax[1].hist(s_vgg16[1].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[1].set_title("vgg16 G")
-ax[2].hist(s_vgg16[2].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[2].set_title("vgg16 B")
-fig.suptitle("eps :" + str(eps) + " clean acc :" + str(acc_vgg16*100) + "%"+ " adv acc :" + str(acc_vgg16_adv*100) + "%")
-plt.subplots_adjust(left=0.05, right=0.99)
-plt.savefig("assets/vgg16_gradient" + "_size" + str(size) + ".png")
-plt.close()
-
-#vgg19
+#vgg16
 vgg19 = tf.keras.applications.vgg19.VGG19(weights='imagenet')
-x_vgg19 = copy.deepcopy(x)
-x_vgg19 = tf.keras.applications.vgg19.preprocess_input(x_vgg19)
-preds_vgg19 = np.argmax(vgg19.predict(x_vgg19), axis=1)
-acc_vgg19 = np.sum(preds_vgg19 == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_vgg19*100,"vgg19 clean img")
-grad_vgg19 = get_loss_gradient(vgg19, x, y)
-X_adv_vgg19 = copy.deepcopy(x)
-X_adv_vgg19 = X_adv_vgg19 + eps*np.sign(grad_vgg19)*img_max
-X_adv_vgg19 = np.clip(X_adv_vgg19, 0, 255)
-X_adv_vgg19 = tf.keras.applications.vgg19.preprocess_input(X_adv_vgg19)
-preds_vgg19_adv = np.argmax(vgg19.predict(X_adv_vgg19), axis=1)
-acc_vgg19_adv = np.sum(preds_vgg19_adv == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_vgg19_adv*100, "vgg19 adv img")
-U, s_vgg19, V = np.linalg.svd(tf.transpose(grad_vgg19), full_matrices=False)
-
-fig, ax = plt.subplots(1, 3,figsize=(12.0, 5.0))
-ax[0].hist(s_vgg19[0].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[0].set_title("vgg19 R")
-ax[1].hist(s_vgg19[1].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[1].set_title("vgg19 G")
-ax[2].hist(s_vgg19[2].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[2].set_title("vgg19 B")
-fig.suptitle("eps :" + str(eps) + " clean acc :" + str(acc_vgg19*100) + "%"+ " adv acc :" + str(acc_vgg19_adv*100) + "%")
-plt.subplots_adjust(left=0.05, right=0.99)
-plt.savefig("assets/vgg19_gradient" + "_size" + str(size) + ".png")
-plt.close()
+atk_FGSM_and_plot_grad_eig(x,y,vgg19,tf.keras.applications.vgg19,name="vgg19")
 
 #resnet50
 resnet50 = tf.keras.applications.resnet50.ResNet50(weights='imagenet')
-x_resnet50 = copy.deepcopy(x)
-x_resnet50 = tf.keras.applications.resnet50.preprocess_input(x_resnet50)
-preds_resnet50 = np.argmax(resnet50.predict(x_resnet50), axis=1)
-acc_resnet50 = np.sum(preds_resnet50 == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_resnet50*100,"resnet50 clean img")
-grad_resnet50 = get_loss_gradient(resnet50, x, y)
-X_adv_resnet50 = copy.deepcopy(x)
-X_adv_resnet50 = X_adv_resnet50 + eps*np.sign(grad_resnet50)*img_max
-X_adv_resnet50 = np.clip(X_adv_resnet50, 0, 255)
-X_adv_resnet50 = tf.keras.applications.resnet50.preprocess_input(X_adv_resnet50)
-preds_resnet50_adv = np.argmax(resnet50.predict(X_adv_resnet50), axis=1)
-acc_resnet50_adv = np.sum(preds_resnet50_adv == np.argmax(y, axis=1)) / y.shape[0]
-print(acc_resnet50_adv*100, "resnet50 adv img")
-U, s_resnet50, V = np.linalg.svd(tf.transpose(grad_resnet50), full_matrices=False)
+atk_FGSM_and_plot_grad_eig(x,y,resnet50,tf.keras.applications.resnet50,name="resnet50")
 
-fig, ax = plt.subplots(1, 3,figsize=(12.0, 5.0))
-ax[0].hist(s_resnet50[0].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[0].set_title("resnet50 R")
-ax[1].hist(s_resnet50[1].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[1].set_title("resnet50 G")
-ax[2].hist(s_resnet50[2].reshape(-1)*adj*size,range=(-0.01,5),bins=size,density=True)
-ax[2].set_title("resnet50 B")
-fig.suptitle("eps :" + str(eps) + " clean acc :" + str(acc_resnet50*100) + "%"+ " adv acc :" + str(acc_resnet50_adv*100) + "%")
-plt.subplots_adjust(left=0.05, right=0.99)
-plt.savefig("assets/resnet50_gradient" + "_size" + str(size) + ".png")
-plt.close()
+#inception_v3
+inception_v3 = tf.keras.applications.inception_v3.InceptionV3(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,inception_v3,tf.keras.applications.inception_v3,shape=(299,299),name="inception_v3")
+
+#inception_resnet_v2
+inception_resnet_v2 = tf.keras.applications.inception_resnet_v2.InceptionResNetV2(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,inception_resnet_v2,tf.keras.applications.inception_resnet_v2,shape=(299,299),name="inception_resnet_v2")
+
+#mobilenet
+mobilenet = tf.keras.applications.mobilenet.MobileNet(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,mobilenet,tf.keras.applications.mobilenet,name="mobilenet")
+
+#densenet
+densenet121 = tf.keras.applications.densenet.DenseNet121(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,densenet121,tf.keras.applications.densenet,name="densenet121")
+densenet169 = tf.keras.applications.densenet.DenseNet169(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,densenet169,tf.keras.applications.densenet,name="densenet169")
+densenet201 = tf.keras.applications.densenet.DenseNet201(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,densenet201,tf.keras.applications.densenet,name="densenet201")
+
+#NASNet
+#nasnet_large = tf.keras.applications.nasnet.NASNetLarge(weights='imagenet')
+#atk_FGSM_and_plot_grad_eig(x,y,nasnet_large,tf.keras.applications.nasnet,shape=(331,331),name="nasnet_large")
+nasnet_mobile = tf.keras.applications.nasnet.NASNetMobile(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,nasnet_mobile,tf.keras.applications.nasnet,name="nasnet_mobile")
+
+#mobilenet_v2
+mobilenet_v2 = tf.keras.applications.mobilenet_v2.MobileNetV2(weights='imagenet')
+atk_FGSM_and_plot_grad_eig(x,y,mobilenet_v2,tf.keras.applications.mobilenet_v2,name="mobilenet_v2")
