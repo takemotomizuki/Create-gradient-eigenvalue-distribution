@@ -8,8 +8,6 @@ from PIL import Image
 import powerlaw
 import math
 
-EVALS_THRESH = 0.00001
-
 # Configure a logger to capture outputs; these are printed in console and the level of detail is set to INFO
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,7 +59,17 @@ def get_loss_gradient(model, _x, _y):
 
     return gradient
 
-def atk_FGSM_and_plot_grad_eig(_x,_y,model,application,shape=None,name:str=""):
+def calc_tale_size(evals):
+    max_eval = np.max(evals)
+
+    evals_sorted = np.sort(evals)
+    size = len(evals)
+    border_size = int(size*0.8)
+
+    return evals_sorted[border_size]/max_eval
+
+#atk_success rate = acc_adv/acc
+def atk_FGSM_and_plot_grad_eig(_x,_y,model,application:function,shape=None,name:str=""):
     x_preprocessed = copy.deepcopy(_x)
     if shape is not None:
         tmp = []
@@ -82,9 +90,13 @@ def atk_FGSM_and_plot_grad_eig(_x,_y,model,application,shape=None,name:str=""):
     
     logger.info(f'Accuracy on clean test images of {name}: {acc*100:.2f}')
     logger.info(f'Accuracy of FGSM attacks of {name}: {acc_adv*100:.2f}%')
+    logger.info(f'Attack succes rate: {(1-acc_adv/acc)*100:.2f}%')
 
     U, s, V = np.linalg.svd(tf.transpose(grad), full_matrices=False)
 
+    tale_size = calc_tale_size(s[0].reshape(-1))
+    logger.info(f'Tale rate : {tale_size}')
+    
     label = ["R","G","B"]
     range_max = np.max(s)
     fig, ax = plt.subplots(1, 3,figsize=(12.0, 5.0))
@@ -96,11 +108,11 @@ def atk_FGSM_and_plot_grad_eig(_x,_y,model,application,shape=None,name:str=""):
     plt.subplots_adjust(left=0.05, right=0.99)
     plt.savefig(f'assets/{name}_gradient_size{size}.png')
     plt.close()
-    
-    nz_s = s[s > EVALS_THRESH]
+
+   
     #fit = powerlaw.Fit(nz_s, xmax=range_max, verbose=False)
 
-    range_min_log = math.log10(np.min(nz_s))
+    range_min_log = math.log10(np.min(s))
     range_max_log = math.log10(range_max)
 
     fig, ax = plt.subplots(1, 3,figsize=(24.0, 5.0))
@@ -116,53 +128,91 @@ def atk_FGSM_and_plot_grad_eig(_x,_y,model,application,shape=None,name:str=""):
     plt.close()
     logger.info('saved image')
 
+    return tale_size, (1-acc_adv/acc)*100
+    
+
 #自作したnpzファイル画像サイズは224,224で保存している
 d= np.load('../dataset/imagenet_val_float.npz')
 x = d['x'][:size]
 y = d['y'][:size]
 
+tale_rate_list = []
+atk_succes_list = []
+
 #xception
 xception = tf.keras.applications.xception.Xception(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,xception,tf.keras.applications.xception,shape=(299,299),name="xception")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,xception,tf.keras.applications.xception,shape=(299,299),name="xception")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #vgg16
 vgg16 = tf.keras.applications.vgg16.VGG16(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,vgg16,tf.keras.applications.vgg16,name="vgg16")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,vgg16,tf.keras.applications.vgg16,name="vgg16")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
-#vgg16
+#vgg19m
 vgg19 = tf.keras.applications.vgg19.VGG19(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,vgg19,tf.keras.applications.vgg19,name="vgg19")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,vgg19,tf.keras.applications.vgg19,name="vgg19")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #resnet50
 resnet50 = tf.keras.applications.resnet50.ResNet50(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,resnet50,tf.keras.applications.resnet50,name="resnet50")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,resnet50,tf.keras.applications.resnet50,name="resnet50")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #inception_v3
 inception_v3 = tf.keras.applications.inception_v3.InceptionV3(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,inception_v3,tf.keras.applications.inception_v3,shape=(299,299),name="inception_v3")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,inception_v3,tf.keras.applications.inception_v3,shape=(299,299),name="inception_v3")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #inception_resnet_v2
 inception_resnet_v2 = tf.keras.applications.inception_resnet_v2.InceptionResNetV2(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,inception_resnet_v2,tf.keras.applications.inception_resnet_v2,shape=(299,299),name="inception_resnet_v2")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,inception_resnet_v2,tf.keras.applications.inception_resnet_v2,shape=(299,299),name="inception_resnet_v2")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #mobilenet
 mobilenet = tf.keras.applications.mobilenet.MobileNet(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,mobilenet,tf.keras.applications.mobilenet,name="mobilenet")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,mobilenet,tf.keras.applications.mobilenet,name="mobilenet")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #densenet
 densenet121 = tf.keras.applications.densenet.DenseNet121(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,densenet121,tf.keras.applications.densenet,name="densenet121")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,densenet121,tf.keras.applications.densenet,name="densenet121")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 densenet169 = tf.keras.applications.densenet.DenseNet169(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,densenet169,tf.keras.applications.densenet,name="densenet169")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,densenet169,tf.keras.applications.densenet,name="densenet169")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 densenet201 = tf.keras.applications.densenet.DenseNet201(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,densenet201,tf.keras.applications.densenet,name="densenet201")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,densenet201,tf.keras.applications.densenet,name="densenet201")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #NASNet
-#nasnet_large = tf.keras.applications.nasnet.NASNetLarge(weights='imagenet')
-#atk_FGSM_and_plot_grad_eig(x,y,nasnet_large,tf.keras.applications.nasnet,shape=(331,331),name="nasnet_large")
+nasnet_large = tf.keras.applications.nasnet.NASNetLarge(weights='imagenet')
+t,a = atk_FGSM_and_plot_grad_eig(x,y,nasnet_large,tf.keras.applications.nasnet,shape=(331,331),name="nasnet_large")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 nasnet_mobile = tf.keras.applications.nasnet.NASNetMobile(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,nasnet_mobile,tf.keras.applications.nasnet,name="nasnet_mobile")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,nasnet_mobile,tf.keras.applications.nasnet,name="nasnet_mobile")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
 
 #mobilenet_v2
 mobilenet_v2 = tf.keras.applications.mobilenet_v2.MobileNetV2(weights='imagenet')
-atk_FGSM_and_plot_grad_eig(x,y,mobilenet_v2,tf.keras.applications.mobilenet_v2,name="mobilenet_v2")
+t,a = atk_FGSM_and_plot_grad_eig(x,y,mobilenet_v2,tf.keras.applications.mobilenet_v2,name="mobilenet_v2")
+tale_rate_list.append(t)
+atk_succes_list.append(a)
+
+plt.scatter(tale_rate_list, atk_succes_list)
+plt.xlabel("Tale rate")
+plt.ylabel("Atk success rate")
+plt.savefig(f'assets/tale_rate_size{size}.png')
+plt.close()
