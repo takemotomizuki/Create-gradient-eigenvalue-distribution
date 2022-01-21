@@ -10,7 +10,7 @@ import pandas as pd
 import powerlaw
 
 from fgsm_gradient_watcher import FGSM_Gradient_Watcher
-from model_list import load_model_list
+from model_list_cnn_mnist import load_model_list
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -19,13 +19,20 @@ formatter = logging.Formatter('[%(levelname)s] %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-size = 500
-noise_str = 0.4
+size = 10000
+noise_str = 0.2
 
-#自作したnpzファイル画像サイズは224,224で保存している
-d= np.load('../dataset/imagenet_val_float.npz')
-x = d['x'][:size]
-y = d['y'][:size]
+mnist = tf.keras.datasets.mnist
+(x_train, y_train), (x_test, y_test) = mnist.load_data()
+x_train = x_train.astype('float32')
+x_test = x_test.astype('float32')
+x_train = x_train.reshape((60000, 28, 28, 1))
+x_test = x_test.reshape((10000, 28, 28, 1))
+x_train, x_test = x_train / 255.0, x_test / 255.0
+
+# テスト画像からいくつか選択
+x = x_test[:size]
+y = np.eye(10)[y_test[:size]]
 
 model_list = load_model_list(x,y)
 
@@ -52,7 +59,7 @@ for model in model_list:
     alpha = fit.alpha
 
     # 予測を正解ラベルとした攻撃
-    preds_onehot = np.eye(1000)[preds]
+    preds_onehot = np.eye(10)[preds]
     grad_preds_base = model.get_loss_gradient(preds_onehot)
     X_adv_preds_base = model.generate_adversarial_image(grad_preds_base,noise_str)
     preds_adv_preds_base = np.argmax(model.predict(X_adv_preds_base), axis=1)
@@ -90,4 +97,4 @@ df = pd.DataFrame(
     'alpha_preds_base',
     ])
 
-df.to_csv(f'assets/parameter_size{size}.csv')
+df.to_csv(f'assets/parameter_cnn_mnist_layer_size{size}.csv')

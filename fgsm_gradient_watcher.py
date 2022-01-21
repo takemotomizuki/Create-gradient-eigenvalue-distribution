@@ -1,4 +1,5 @@
 import logging
+from xmlrpc.client import boolean
 
 import tensorflow as tf
 import numpy as np
@@ -20,7 +21,8 @@ class FGSM_Gradient_Watcher():
         image_shape:tuple=None,
         preprocess=None,
         mode:str=None,
-        loss_object = tf.keras.losses.CategoricalCrossentropy()
+        loss_object = tf.keras.losses.SparseCategoricalCrossentropy(),
+        logits:boolean=False,
         ):
         self.model:tf.keras.Model = model
         self.input:np.ndarray = input
@@ -32,6 +34,7 @@ class FGSM_Gradient_Watcher():
         self.model_name:str = model_name
         self.mode:str = mode
         self.loss_object = loss_object
+        self.logits = logits
 
     def preprocess_input(self,preprocess):
         x_preprocessed = copy.deepcopy(self.input)
@@ -43,7 +46,7 @@ class FGSM_Gradient_Watcher():
         for img in self.input:
             img_pil = Image.fromarray(np.uint8(img))
             img_resize = img_pil.resize(shape)
-            tmp.append(np.asarray(img_resize))
+            tmp.append(np.float32(np.asarray(img_resize)))
         return np.array(tmp)
 
     def predict(self,x):
@@ -53,11 +56,13 @@ class FGSM_Gradient_Watcher():
         if y is None:
             y=self.label
 
-        num = len(self.input)/50
-        x_split = np.array_split(self.input, num+1)
-        y_split = np.array_split(y, num+1)
+        num = len(self.input)
+        x_split = np.array_split(self.input, num)
+        y_split = np.array_split(y, num)
         gradient = None
         for xs,ys in zip(x_split,y_split):
+            if self.logits:
+                ys = np.argmax(ys, axis=1)
             input_images = tf.multiply(xs, 1)
             input_labels = tf.multiply(ys, 1)
             with tf.GradientTape() as tape:
@@ -84,6 +89,8 @@ class FGSM_Gradient_Watcher():
                 eps[0] = eps[0] / 255.0 / 0.229 # for R
                 eps[1] = eps[1] / 255.0 / 0.224 # for G
                 eps[2] = eps[2] / 255.0 / 0.225 # for B
+            elif self.mode == 'channel1':
+                eps = noise_str
     
         x = copy.deepcopy(self.input)
         X_adv = x + eps*np.sign(gradient)
@@ -125,7 +132,7 @@ class FGSM_Gradient_Watcher():
         max_eval = np.max(s)
 
         evals_sorted = np.sort(s.reshape(-1))
-        size = len(s)
+        size = len(evals_sorted)
         border_size = int(size*0.8)
 
         return evals_sorted[border_size]/max_eval

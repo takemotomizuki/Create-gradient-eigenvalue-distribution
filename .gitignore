@@ -1,2 +1,3 @@
 #assetは結果保存用なのでバージョン管理外にする
-/assets/*
+/images/*
+/models/*
